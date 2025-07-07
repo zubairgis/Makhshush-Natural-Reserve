@@ -1,0 +1,55 @@
+library(sf)
+library(dplyr)
+library(randomForest)
+library(xgboost)
+library(nnet)
+library(fastshap)
+library(ggplot2)
+
+shp_path <- "D:/1 Research_Papers/1 Asir_Et/Variables/Data_ANN_Predicted.shp"
+data_sf  <- st_read(shp_path)
+df       <- as.data.frame(data_sf)
+
+predictors <- c("NDVI_SS", "NDWI_SS", "LST_SS", "Veg_Type", "PAW", "Ph", "OCC")
+df$Plant_S <- as.numeric(df$Plant_S)
+df <- df[complete.cases(df[, c(predictors, "Plant_S")]), ]
+
+set.seed(123)
+df_sub <- df[sample(nrow(df), 10000), ]
+df_sub[predictors] <- scale(df_sub[predictors])
+X_mat <- as.matrix(df_sub[, predictors])
+
+rf_model <- randomForest(x = df_sub[, predictors], y = df_sub$Plant_S, ntree = 100)
+xgb_data <- xgb.DMatrix(data = X_mat, label = df_sub$Plant_S)
+xgb_model <- xgboost(data = xgb_data, nrounds = 100, objective = "reg:squarederror", verbose = 0)
+
+rf_pred  <- function(object, newdata) predict(object, newdata)
+xgb_pred <- function(object, newdata) predict(object, newdata)
+
+set.seed(1)
+sh_rf  <- fastshap::explain(rf_model,  X = X_mat, pred_wrapper = rf_pred,  feature_names = predictors, nsim = 100)
+sh_xgb <- fastshap::explain(xgb_model, X = X_mat, pred_wrapper = xgb_pred, feature_names = predictors, nsim = 100)
+
+shap_summary <- function(shap, model) {
+  df <- data.frame(
+    Variable   = colnames(shap),
+    Mean_SHAP  = colMeans(abs(shap)),
+    SD_SHAP    = apply(abs(shap), 2, sd),
+    Model      = model
+  )
+  df
+}
+
+df_rf  <- shap_summary(sh_rf, "Random Forest")
+df_xgb <- shap_summary(sh_xgb, "XGBoost")
+summary_df <- rbind(df_rf, df_xgb)
+
+ggplot(summary_df, aes(x = reorder(Variable, Mean_SHAP), y = Mean_SHAP, fill = Model)) +
+  geom_bar(stat = "identity", position = position_dodge(width = 0.8), width = 0.6) +
+  geom_errorbar(aes(ymin = Mean_SHAP - SD_SHAP, ymax = Mean_SHAP + SD_SHAP),
+                position = position_dodge(width = 0.8), width = 0.2) +
+  coord_flip() +
+  labs(title = "Mean ± SD SHAP Values", x = "Predictor", y = "Mean |SHAP| Value") +
+  theme_minimal(base_size = 14)
+
+print(summary_df)
